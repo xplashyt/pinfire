@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@keyframes facet-glow {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 6px rgba(245, 185, 66, 0.35));
+  }
+  50% {
+    filter: drop-shadow(0 0 18px rgba(245, 185, 66, 0.65));
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .animate-facet-glow {
+    animation: facet-glow 3.2s ease-in-out infinite;
+  }
+}
+
+:focus-visible {
+  outline: 2px solid theme("colors.teal");
+  outline-offset: 2px;
+}
