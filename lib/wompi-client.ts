@@ -14,7 +14,25 @@ import { wompiBaseUrl } from "./wompi-env";
  * cumplir el nivel más exigente de PCI DSS.
  */
 
-const PUBLIC_KEY = process.env.NEXT_PUBLIC_WOMPI_PUBLIC_KEY as string;
+const PUBLIC_KEY = process.env.NEXT_PUBLIC_WOMPI_PUBLIC_KEY;
+
+/**
+ * Next.js reemplaza `NEXT_PUBLIC_*` por su valor literal al COMPILAR, no al
+ * ejecutar. Si la variable no existía durante el build (típico: se agregó en
+ * Vercel después de desplegar y no se volvió a construir), aquí llega
+ * undefined. Sin este guard el síntoma es un "Cannot read properties of
+ * undefined (reading 'startsWith')" en la cara del cliente, imposible de
+ * diagnosticar desde el navegador.
+ */
+function requirePublicKey(): string {
+  if (!PUBLIC_KEY) {
+    throw new Error(
+      "Configuración incompleta: falta NEXT_PUBLIC_WOMPI_PUBLIC_KEY en el build. " +
+        "Agrégala en las variables de entorno y vuelve a desplegar."
+    );
+  }
+  return PUBLIC_KEY;
+}
 
 export interface CardInput {
   number: string;
@@ -31,10 +49,12 @@ export interface CardToken {
 }
 
 export async function tokenizeCard(card: CardInput): Promise<CardToken> {
-  const res = await fetch(`${wompiBaseUrl(PUBLIC_KEY)}/tokens/cards`, {
+  const publicKey = requirePublicKey();
+
+  const res = await fetch(`${wompiBaseUrl(publicKey)}/tokens/cards`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${PUBLIC_KEY}`,
+      Authorization: `Bearer ${publicKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
