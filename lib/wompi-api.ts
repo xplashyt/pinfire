@@ -1,7 +1,27 @@
 import { buildIntegritySignature } from "./wompi";
 import { wompiBaseUrl } from "./wompi-env";
+import { classifyGatewayFailure, type PaymentErrorCode } from "./payment-errors";
 
 export { wompiBaseUrl };
+
+/**
+ * Error de pago clasificado. A diferencia de un `Error` genérico, trae el
+ * `code` (para que la ruta de API elija el status HTTP correcto) y el
+ * `hint` accionable (para que el navegador se lo muestre a quien paga,
+ * además del mensaje). Ver lib/payment-errors.ts para el criterio de
+ * clasificación.
+ */
+export class PaymentGatewayError extends Error {
+  readonly code: PaymentErrorCode;
+  readonly hint?: string;
+
+  constructor(code: PaymentErrorCode, message: string, hint?: string) {
+    super(message);
+    this.name = "PaymentGatewayError";
+    this.code = code;
+    this.hint = hint;
+  }
+}
 
 /**
  * Cliente de la API de Wompi.
@@ -45,21 +65,61 @@ export interface AcceptanceTokens {
 export async function getAcceptanceTokens(): Promise<AcceptanceTokens> {
   const { publicKey, base } = serverConfig();
 
-  const res = await fetch(`${base}/merchants/${publicKey}`, {
-    cache: "no-store",
-  });
-
-  if (!res.ok) {
-    throw new Error(`Wompi /merchants respondió ${res.status}`);
+  let res: Response;
+  try {
+    res = await fetch(`${base}/merchants/${publicKey}`, {
+      cache: "no-store",
+    });
+  } catch (error) {
+    console.error("No se pudo conectar para pedir los tokens de aceptación:", error);
+    const classified = classifyGatewayFailure({ networkError: true });
+    throw new PaymentGatewayError(classified.code, classified.message, classified.hint);
   }
 
-  const { data } = await res.json();
+  // Texto primero, JSON después: si lo que volvió no es JSON (por ejemplo una
+  // página de bloqueo de un WAF delante de la API de Wompi), `res.json()`
+  // lanzaría antes de poder distinguir esa causa de un simple 5xx.
+  const rawText = await res.text().catch(() => "");
+  let body: {
+    data?: {
+      presigned_acceptance?: { acceptance_token?: string; permalink?: string };
+      presigned_personal_data_auth?: { acceptance_token?: string; permalink?: string };
+    };
+  } | null = null;
+  try {
+    body = rawText ? JSON.parse(rawText) : null;
+  } catch {
+    body = null;
+  }
+
+  if (!res.ok) {
+    console.error("Wompi /merchants respondió con error:", {
+      httpStatus: res.status,
+      rawBody: body ? undefined : rawText.slice(0, 300),
+    });
+    const classified = classifyGatewayFailure({
+      httpStatus: res.status,
+      nonJsonResponse: body === null && rawText.length > 0,
+    });
+    throw new PaymentGatewayError(classified.code, classified.message, classified.hint);
+  }
+
+  const acceptance = body?.data?.presigned_acceptance;
+  const personal = body?.data?.presigned_personal_data_auth;
+
+  if (!acceptance?.acceptance_token || !personal?.acceptance_token) {
+    console.error("Respuesta de /merchants sin tokens de aceptación:", body);
+    throw new PaymentGatewayError(
+      "UNKNOWN",
+      "La pasarela de pagos no está configurada correctamente. Escríbenos para completar tu compra."
+    );
+  }
 
   return {
-    acceptanceToken: data.presigned_acceptance.acceptance_token,
-    acceptanceUrl: data.presigned_acceptance.permalink,
-    personalDataToken: data.presigned_personal_data_auth.acceptance_token,
-    personalDataUrl: data.presigned_personal_data_auth.permalink,
+    acceptanceToken: acceptance.acceptance_token,
+    acceptanceUrl: acceptance.permalink ?? "",
+    personalDataToken: personal.acceptance_token,
+    personalDataUrl: personal.permalink ?? "",
   };
 }
 
@@ -100,40 +160,83 @@ export async function createTransaction(
     integritySecret
   );
 
-  const res = await fetch(`${base}/transactions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${privateKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      acceptance_token: input.acceptanceToken,
-      accept_personal_auth: input.personalDataToken,
-      amount_in_cents: input.amountInCents,
-      currency: "COP",
-      customer_email: input.customerEmail,
+  let res: Response;
+  try {
+    res = await fetch(`${base}/transactions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${privateKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        acceptance_token: input.acceptanceToken,
+        accept_personal_auth: input.personalDataToken,
+        amount_in_cents: input.amountInCents,
+        currency: "COP",
+        customer_email: input.customerEmail,
+        reference: input.reference,
+        signature,
+        payment_method: input.paymentMethod,
+        customer_data: { full_name: input.customerFullName },
+        ...(input.customerIp ? { ip: input.customerIp } : {}),
+      }),
+    });
+  } catch (error) {
+    // El fetch nunca llegó a Wompi: DNS, timeout, sin salida a internet desde
+    // el servidor... Nada de esto tiene un `res.status` que clasificar.
+    console.error("No se pudo conectar para crear la transacción:", {
       reference: input.reference,
-      signature,
-      payment_method: input.paymentMethod,
-      customer_data: { full_name: input.customerFullName },
-      ...(input.customerIp ? { ip: input.customerIp } : {}),
-    }),
-  });
-
-  const body = await res.json().catch(() => null);
-
-  if (!res.ok) {
-    // El detalle crudo lleva nombres de campos internos de Wompi, útiles
-    // para depurar pero no para mostrárselos al cliente.
-    console.error("Wompi rechazó la transacción:", JSON.stringify(body));
-
-    const detalle = collectMessages(body?.error?.messages);
-    throw new Error(
-      detalle.join(" ") || body?.error?.reason || `Wompi respondió ${res.status}`
-    );
+      message: error instanceof Error ? error.message : String(error),
+    });
+    const classified = classifyGatewayFailure({ networkError: true });
+    throw new PaymentGatewayError(classified.code, classified.message, classified.hint);
   }
 
-  return body.data as WompiTransaction;
+  // Igual que en getAcceptanceTokens: texto primero, JSON después. Un bloqueo
+  // de WAF/firewall delante de la API de Wompi (IP marcada como sospechosa,
+  // por ejemplo) típicamente responde con una página HTML, no con el JSON de
+  // error que espera este código.
+  const rawText = await res.text().catch(() => "");
+  let body: {
+    data?: WompiTransaction;
+    error?: { type?: string; reason?: unknown; messages?: unknown };
+  } | null = null;
+  try {
+    body = rawText ? JSON.parse(rawText) : null;
+  } catch {
+    body = null;
+  }
+
+  if (!res.ok || !body?.data?.id) {
+    // El detalle crudo lleva nombres de campos internos de Wompi, útiles
+    // para depurar pero no para mostrárselos al cliente.
+    console.error("Wompi rechazó la transacción:", {
+      httpStatus: res.status,
+      body,
+      rawBody: body ? undefined : rawText.slice(0, 300),
+      reference: input.reference,
+    });
+
+    // Si Wompi devolvió su formato habitual de error de VALIDACIÓN, esos
+    // mensajes sí describen algo que quien paga puede corregir (un campo mal
+    // formado, por ejemplo). Si no —403/429/5xx, 200 sin cuerpo utilizable, o
+    // ni siquiera vino JSON—, el problema es la pasarela o la conexión, no lo
+    // que el cliente escribió, y así se lo decimos en vez de exponerle el
+    // código HTTP crudo.
+    const detalle = collectMessages(body?.error?.messages);
+    if (detalle.length > 0) {
+      throw new Error(detalle.join(" "));
+    }
+
+    const classified = classifyGatewayFailure({
+      httpStatus: res.status,
+      wompiErrorType: body?.error?.type ?? null,
+      nonJsonResponse: body === null && rawText.length > 0,
+    });
+    throw new PaymentGatewayError(classified.code, classified.message, classified.hint);
+  }
+
+  return body.data;
 }
 
 /**

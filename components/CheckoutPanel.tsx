@@ -9,6 +9,7 @@ import {
   formatExpiry,
   tokenizeCard,
 } from "@/lib/wompi-client";
+import { classifyDeclineReason } from "@/lib/payment-errors";
 
 type Metodo = "CARD" | "NEQUI";
 type Fase = "form" | "procesando" | "aprobado" | "rechazado" | "expirado";
@@ -98,7 +99,8 @@ export default function CheckoutPanel({
       if (tx.status === "APPROVED") return setFase("aprobado");
 
       if (tx.status === "DECLINED" || tx.status === "ERROR" || tx.status === "VOIDED") {
-        setError(tx.statusMessage || null);
+        const classified = classifyDeclineReason(tx.statusMessage);
+        setError(`${classified.message} ${classified.hint ?? ""}`.trim());
         return setFase("rechazado");
       }
     }
@@ -154,17 +156,32 @@ export default function CheckoutPanel({
 
       const data = await res.json();
 
-      if (!res.ok) throw new Error(data.error || "No pudimos iniciar el pago");
+      if (!res.ok) {
+        // El servidor ya viene con el error clasificado (fondos insuficientes,
+        // IP bloqueada, rate limiting, etc. — ver lib/payment-errors.ts) más
+        // un consejo accionable; los unimos en una sola frase para mostrarlos.
+        throw new Error(
+          [data.error, data.hint].filter(Boolean).join(" ") ||
+            "No pudimos iniciar el pago"
+        );
+      }
 
       if (data.status === "APPROVED") return setFase("aprobado");
       if (data.status === "DECLINED" || data.status === "ERROR") {
-        setError(data.statusMessage || null);
+        const classified = classifyDeclineReason(data.statusMessage);
+        setError(`${classified.message} ${classified.hint ?? ""}`.trim());
         return setFase("rechazado");
       }
 
       await esperarResultado(data.id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Algo salió mal");
+      if (err instanceof TypeError) {
+        // fetch() nunca llegó a nuestro propio servidor: sin internet, o el
+        // navegador cortó la conexión antes de recibir respuesta.
+        setError("No pudimos conectar con el servidor. Revisa tu conexión a internet e intenta de nuevo.");
+      } else {
+        setError(err instanceof Error ? err.message : "Algo salió mal");
+      }
       setFase("rechazado");
     }
   }

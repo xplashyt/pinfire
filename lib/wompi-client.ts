@@ -1,4 +1,5 @@
 import { wompiBaseUrl } from "./wompi-env";
+import { classifyGatewayFailure } from "./payment-errors";
 
 /**
  * Tokenización de tarjetas — se ejecuta SOLO en el navegador.
@@ -51,35 +52,63 @@ export interface CardToken {
 export async function tokenizeCard(card: CardInput): Promise<CardToken> {
   const publicKey = requirePublicKey();
 
-  const res = await fetch(`${wompiBaseUrl(publicKey)}/tokens/cards`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${publicKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      number: card.number.replace(/\s/g, ""),
-      exp_month: card.expMonth,
-      exp_year: card.expYear,
-      cvc: card.cvc,
-      card_holder: card.cardHolder,
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${wompiBaseUrl(publicKey)}/tokens/cards`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${publicKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        number: card.number.replace(/\s/g, ""),
+        exp_month: card.expMonth,
+        exp_year: card.expYear,
+        cvc: card.cvc,
+        card_holder: card.cardHolder,
+      }),
+    });
+  } catch {
+    // El navegador nunca llegó a Wompi: sin internet, DNS, o un bloqueador de
+    // contenido cortó la petición. Esto NO es un problema de la tarjeta.
+    const classified = classifyGatewayFailure({ networkError: true });
+    throw new Error(`${classified.message} ${classified.hint ?? ""}`.trim());
+  }
 
-  const body = await res.json().catch(() => null);
+  const rawText = await res.text().catch(() => "");
+  let body: {
+    status?: string;
+    data?: { id?: string; brand?: string; last_four?: string };
+    error?: { type?: string; messages?: unknown };
+  } | null = null;
+  try {
+    body = rawText ? JSON.parse(rawText) : null;
+  } catch {
+    body = null;
+  }
 
-  if (!res.ok || body?.status !== "CREATED") {
+  if (!res.ok || body?.status !== "CREATED" || !body?.data?.id) {
+    // Si Wompi respondió con su formato habitual de error de validación, el
+    // problema SÍ son los datos de la tarjeta. Si no —403/429/5xx, o una
+    // respuesta que ni siquiera es JSON (página de bloqueo de un WAF)—, el
+    // problema es la conexión, no la tarjeta, y así se lo decimos a quien
+    // está pagando en vez de culpar al número que escribió.
     const messages = body?.error?.messages;
-    const detalle = messages
-      ? Object.values(messages).flat().join(" ")
-      : "No pudimos validar los datos de la tarjeta.";
-    throw new Error(detalle);
+    if (messages) {
+      throw new Error(Object.values(messages).flat().join(" "));
+    }
+    const classified = classifyGatewayFailure({
+      httpStatus: res.status,
+      wompiErrorType: body?.error?.type ?? null,
+      nonJsonResponse: body === null && rawText.length > 0,
+    });
+    throw new Error(`${classified.message} ${classified.hint ?? ""}`.trim());
   }
 
   return {
     id: body.data.id,
-    brand: body.data.brand,
-    lastFour: body.data.last_four,
+    brand: body.data.brand ?? "",
+    lastFour: body.data.last_four ?? "",
   };
 }
 

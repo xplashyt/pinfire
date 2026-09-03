@@ -3,12 +3,31 @@ import { parseReference } from "@/lib/orders";
 import {
   createTransaction,
   getAcceptanceTokens,
+  PaymentGatewayError,
   type PaymentMethodInput,
 } from "@/lib/wompi-api";
+import type { PaymentErrorCode } from "@/lib/payment-errors";
 
 export const runtime = "nodejs";
 
 const CUOTAS_VALIDAS = [1, 2, 3, 6, 12, 18, 24, 36];
+
+/**
+ * Status HTTP por tipo de falla de la pasarela (ver lib/payment-errors.ts).
+ * Lo que no está listado cae en 502 (falla del lado de Wompi, no de quien pide).
+ */
+const HTTP_STATUS_BY_CODE: Partial<Record<PaymentErrorCode, number>> = {
+  ACCESS_BLOCKED: 403,
+  TOO_MANY_ATTEMPTS: 429,
+  INVALID_CONFIGURATION: 500,
+  INVALID_REQUEST: 400,
+  GATEWAY_UNAVAILABLE: 502,
+  NO_CONNECTION: 502,
+};
+
+function httpStatusForCode(code: PaymentErrorCode): number {
+  return HTTP_STATUS_BY_CODE[code] ?? 502;
+}
 
 /**
  * Inicia el cobro. Recibe del navegador solo lo que no puede falsificarse
@@ -98,9 +117,27 @@ export async function POST(req: NextRequest) {
       statusMessage: tx.status_message ?? null,
     });
   } catch (err) {
+    if (err instanceof PaymentGatewayError) {
+      // Clasificado: sabemos si fue la red, un bloqueo de la pasarela (WAF/IP),
+      // rate limiting, configuración inválida, etc. Ver lib/payment-errors.ts.
+      console.error("El pago no se pudo iniciar:", {
+        code: err.code,
+        message: err.message,
+      });
+      return NextResponse.json(
+        { error: err.message, code: err.code, hint: err.hint ?? null },
+        { status: httpStatusForCode(err.code) }
+      );
+    }
+
+    // Errores de validación de Wompi (lib/wompi-api.ts los deja como Error
+    // simple con el texto ya legible) u otra excepción no anticipada.
     console.error("Error creando transacción Wompi:", err);
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "No pudimos iniciar el pago" },
+      {
+        error: err instanceof Error ? err.message : "No pudimos iniciar el pago",
+        code: "UNKNOWN" satisfies PaymentErrorCode,
+      },
       { status: 502 }
     );
   }
