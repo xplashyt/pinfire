@@ -1,23 +1,30 @@
 import type { Metadata } from "next";
-import { Chakra_Petch, Manrope } from "next/font/google";
+import { Allerta_Stencil, Space_Mono } from "next/font/google";
 import "./globals.css";
 
-const chakraPetch = Chakra_Petch({
+// Titulares: look de sello estampado / hologram de tarjeta prepago.
+// Solo mayúsculas y un peso — por diseño se usa nada más en titulares
+// cortos, nunca en párrafos.
+const allertaStencil = Allerta_Stencil({
   subsets: ["latin"],
-  weight: ["500", "600", "700"],
+  weight: "400",
   variable: "--font-display",
 });
 
-const manrope = Manrope({
+// Cuerpo y datos: una sola tipografía para ambos, a propósito. El
+// monoespaciado de un recibo impreso (impresora térmica/matriz de puntos)
+// es coherente con el motivo firma de la página, y evita meter una tercera
+// identidad tipográfica solo para el cuerpo.
+const spaceMono = Space_Mono({
   subsets: ["latin"],
-  weight: ["400", "500", "700", "800"],
-  variable: "--font-body",
+  weight: ["400", "700"],
+  variable: "--font-mono",
 });
 
 export const metadata: Metadata = {
-  title: "PinFire — Diamantes para Free Fire al instante",
+  title: "PinFire — recarga de diamantes para Free Fire",
   description:
-    "Recarga diamantes de Free Fire y paga sin salir de la página. Entrega inmediata.",
+    "Compra diamantes de Free Fire con tarjeta, sin salir de la página. Pago único, comprobante al instante y coordinación de la recarga por correo.",
 };
 
 export default function RootLayout({
@@ -26,11 +33,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="es" className={`${chakraPetch.variable} ${manrope.variable}`}>
-      {/* Ya no cargamos el widget de Wompi: el formulario de pago es
-          nuestro y habla con la API de Wompi directamente. Ver
-          components/CheckoutPanel.tsx y lib/wompi-api.ts. */}
-      <body className="bg-ink font-body text-white antialiased">{children}</body>
+    <html lang="es" className={`${allertaStencil.variable} ${spaceMono.variable}`}>
+      {/* Sin widget ni Web Checkout de Wompi: el formulario es propio y
+          habla contra la API REST. Ver components/CheckoutPanel.tsx y
+          lib/wompi-api.ts. */}
+      <body className="bg-grafito font-mono text-hielo antialiased">{children}</body>
     </html>
   );
 }

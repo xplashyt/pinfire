@@ -4,13 +4,10 @@ import {
   createTransaction,
   getAcceptanceTokens,
   PaymentGatewayError,
-  type PaymentMethodInput,
 } from "@/lib/wompi-api";
 import type { PaymentErrorCode } from "@/lib/payment-errors";
 
 export const runtime = "nodejs";
-
-const CUOTAS_VALIDAS = [1, 2, 3, 6, 12, 18, 24, 36];
 
 /**
  * Status HTTP por tipo de falla de la pasarela (ver lib/payment-errors.ts).
@@ -31,21 +28,19 @@ function httpStatusForCode(code: PaymentErrorCode): number {
 
 /**
  * Inicia el cobro. Recibe del navegador solo lo que no puede falsificarse
- * en nuestra contra: el token de la tarjeta (o el celular de Nequi) y la
- * referencia. El monto lo pone el servidor.
+ * en nuestra contra: el token de la tarjeta y la referencia. El monto lo
+ * pone el servidor, derivado del plan que viaja dentro de la referencia.
  *
- * Responder 200 aquí NO significa que el pago se completó: casi siempre
- * la transacción nace en PENDING. El estado real se consulta con
- * /api/wompi/status, y la entrega se dispara desde el webhook.
+ * Responder 200 aquí NO significa que el pago se completó: casi siempre la
+ * transacción nace en PENDING. El estado real se consulta con
+ * /api/wompi/status, y el webhook es la única fuente de verdad sobre si se
+ * aprobó (ver app/api/wompi/webhook/route.ts).
  */
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
 
-  if (!body?.reference || !body?.email) {
-    return NextResponse.json(
-      { error: "Faltan datos del pedido" },
-      { status: 400 }
-    );
+  if (!body?.reference || !body?.email || !body?.cardToken) {
+    return NextResponse.json({ error: "Faltan datos del pago" }, { status: 400 });
   }
 
   // Wompi exige aceptación explícita de sus dos contratos. Nosotros
@@ -60,38 +55,19 @@ export async function POST(req: NextRequest) {
   }
 
   // Igual que en la firma: el precio jamás se toma del navegador, se
-  // deriva del paquete que viaja dentro de la referencia.
+  // deriva del plan que viaja dentro de la referencia.
   const order = parseReference(String(body.reference));
 
-  if (!order?.pkg) {
+  if (!order?.plan) {
     return NextResponse.json(
-      { error: "Referencia inválida o paquete desconocido" },
+      { error: "Referencia inválida o plan desconocido" },
       { status: 400 }
     );
   }
 
-  let paymentMethod: PaymentMethodInput;
-
-  if (body.method === "CARD") {
-    if (!body.cardToken) {
-      return NextResponse.json({ error: "Falta el token de la tarjeta" }, { status: 400 });
-    }
-    const installments = Number(body.installments) || 1;
-    if (!CUOTAS_VALIDAS.includes(installments)) {
-      return NextResponse.json({ error: "Número de cuotas no válido" }, { status: 400 });
-    }
-    paymentMethod = { type: "CARD", token: String(body.cardToken), installments };
-  } else if (body.method === "NEQUI") {
-    const phone = String(body.phoneNumber || "").replace(/\D/g, "");
-    if (!/^3\d{9}$/.test(phone)) {
-      return NextResponse.json(
-        { error: "El número de Nequi debe ser un celular colombiano de 10 dígitos" },
-        { status: 400 }
-      );
-    }
-    paymentMethod = { type: "NEQUI", phone_number: phone };
-  } else {
-    return NextResponse.json({ error: "Medio de pago no soportado" }, { status: 400 });
+  const cardHolderName = String(body.cardHolderName || "").trim();
+  if (cardHolderName.length < 3) {
+    return NextResponse.json({ error: "Falta el nombre del titular de la tarjeta" }, { status: 400 });
   }
 
   try {
@@ -101,14 +77,12 @@ export async function POST(req: NextRequest) {
 
     const tx = await createTransaction({
       reference: String(body.reference),
-      amountInCents: order.pkg.priceCOP * 100,
+      amountInCents: order.plan.priceCOP * 100,
       customerEmail: String(body.email),
-      paymentMethod,
+      paymentMethod: { type: "CARD", token: String(body.cardToken), installments: 1 },
       acceptanceToken: tokens.acceptanceToken,
       personalDataToken: tokens.personalDataToken,
-      customerFullName: `ID Free Fire ${order.playerId}`,
-      customerIp:
-        req.headers.get("x-forwarded-for")?.split(",")[0].trim() || undefined,
+      customerFullName: cardHolderName,
     });
 
     return NextResponse.json({

@@ -1,62 +1,83 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { formatCOP, type PinPackage } from "@/lib/products";
-import { buildReference, sanitizePlayerId } from "@/lib/orders";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { formatCOP, type Plan } from "@/lib/plans";
+import { buildReference } from "@/lib/orders";
 import {
   detectBrand,
   formatCardNumber,
   formatExpiry,
   tokenizeCard,
 } from "@/lib/wompi-client";
-import { classifyDeclineReason } from "@/lib/payment-errors";
+import {
+  classifyDeclineReason,
+  classifyGatewayFailure,
+  TECHNICAL_CODES,
+  type PaymentErrorCode,
+} from "@/lib/payment-errors";
+import { CORREO_CONTACTO, HORAS_DE_ENTREGA } from "@/lib/contacto";
+import Perforacion from "./Perforacion";
+import { IconoSello } from "./Iconos";
 
-type Metodo = "CARD" | "NEQUI";
-type Fase = "form" | "procesando" | "aprobado" | "rechazado" | "expirado";
-
-const CUOTAS = [1, 2, 3, 6, 12, 18, 24, 36];
+type Fase = "form" | "procesando" | "aprobado" | "rechazado" | "expirado" | "sin-confirmar";
 
 // Cada cuánto le preguntamos a Wompi por el estado, y hasta cuándo.
-// El push de Nequi le da al cliente varios minutos para aceptarlo en su
-// celular, así que la espera tiene que ser generosa.
 const INTERVALO_MS = 2500;
 const ESPERA_MAX_MS = 5 * 60 * 1000;
 
+interface ResultadoPago {
+  mensaje: string;
+  hint?: string;
+  codigo: PaymentErrorCode | null;
+}
+
 export default function CheckoutPanel({
-  pkg,
+  plan,
   onClose,
 }: {
-  pkg: PinPackage;
+  plan: Plan;
   onClose: () => void;
 }) {
-  const [metodo, setMetodo] = useState<Metodo>("CARD");
   const [fase, setFase] = useState<Fase>("form");
-  const [error, setError] = useState<string | null>(null);
-  const [mensajeEspera, setMensajeEspera] = useState("");
+  const [resultado, setResultado] = useState<ResultadoPago | null>(null);
+  const [segundos, setSegundos] = useState(0);
+  const [referenciaActual, setReferenciaActual] = useState<string | null>(null);
+  const [txId, setTxId] = useState<string | null>(null);
+  const [copiado, setCopiado] = useState(false);
 
-  const [playerId, setPlayerId] = useState("");
   const [email, setEmail] = useState("");
   const [acepta, setAcepta] = useState(false);
-
   const [numero, setNumero] = useState("");
   const [vence, setVence] = useState("");
   const [cvc, setCvc] = useState("");
   const [titular, setTitular] = useState("");
-  const [cuotas, setCuotas] = useState(1);
-
-  const [celular, setCelular] = useState("");
 
   const [terminos, setTerminos] = useState<{
     acceptanceUrl: string;
     personalDataUrl: string;
   } | null>(null);
 
-  // El polling tiene que morir si el usuario cierra el panel a mitad del
-  // pago; si no, seguiría corriendo contra un componente desmontado.
+  const emailRef = useRef<HTMLInputElement>(null);
   const cancelado = useRef(false);
-  useEffect(() => () => {
-    cancelado.current = true;
-  }, []);
+
+  // Cierre con Escape, foco inicial en el correo y bloqueo del scroll del
+  // fondo mientras el checkout está abierto — todo se libera al desmontar.
+  useEffect(() => {
+    const overflowPrevio = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    emailRef.current?.focus();
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      cancelado.current = true;
+      document.body.style.overflow = overflowPrevio;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onClose]);
 
   useEffect(() => {
     fetch("/api/wompi/acceptance")
@@ -67,41 +88,53 @@ export default function CheckoutPanel({
       });
   }, []);
 
+  // Contador de tiempo transcurrido mientras procesa — nunca una barra de
+  // progreso falsa: no sabemos cuánto falta, pero sí cuánto ha pasado.
+  useEffect(() => {
+    if (fase !== "procesando") return;
+    setSegundos(0);
+    const id = setInterval(() => setSegundos((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [fase]);
+
   const marca = detectBrand(numero);
 
-  const datosComunesOk = playerId.length >= 5 && /\S+@\S+\.\S+/.test(email) && acepta;
-
-  const tarjetaOk =
+  const emailValido = /\S+@\S+\.\S+/.test(email);
+  const titularValido = titular.trim().length >= 3;
+  const tarjetaValida =
     numero.replace(/\D/g, "").length >= 13 &&
     /^\d{2}\/\d{2}$/.test(vence) &&
-    cvc.length >= 3 &&
-    titular.trim().length >= 5;
+    cvc.length >= 3;
 
-  const nequiOk = /^3\d{9}$/.test(celular.replace(/\D/g, ""));
+  const puedePagar = emailValido && titularValido && tarjetaValida && acepta;
 
-  const puedePagar =
-    datosComunesOk && (metodo === "CARD" ? tarjetaOk : nequiOk);
+  function esTecnico(codigo: PaymentErrorCode | null): boolean {
+    return codigo ? TECHNICAL_CODES.has(codigo) : false;
+  }
 
   async function esperarResultado(id: string) {
     const limite = Date.now() + ESPERA_MAX_MS;
 
     while (Date.now() < limite) {
       if (cancelado.current) return;
-
       await new Promise((r) => setTimeout(r, INTERVALO_MS));
       if (cancelado.current) return;
 
-      const res = await fetch(`/api/wompi/status/${id}`);
-      if (!res.ok) continue; // Un fallo puntual de red no debe abortar la espera.
+      const res = await fetch(`/api/wompi/status/${id}`).catch(() => null);
+      if (!res || !res.ok) continue; // Un fallo puntual de red no debe abortar la espera.
 
       const tx = await res.json();
 
-      if (tx.status === "APPROVED") return setFase("aprobado");
-
+      if (tx.status === "APPROVED") {
+        setTxId(id);
+        setFase("aprobado");
+        return;
+      }
       if (tx.status === "DECLINED" || tx.status === "ERROR" || tx.status === "VOIDED") {
-        const classified = classifyDeclineReason(tx.statusMessage);
-        setError(`${classified.message} ${classified.hint ?? ""}`.trim());
-        return setFase("rechazado");
+        const c = classifyDeclineReason(tx.statusMessage);
+        setResultado({ mensaje: c.message, hint: c.hint, codigo: c.code });
+        setFase("rechazado");
+        return;
       }
     }
 
@@ -111,207 +144,207 @@ export default function CheckoutPanel({
   }
 
   async function pagar() {
-    setError(null);
+    setResultado(null);
     setFase("procesando");
 
+    // La referencia se genera ANTES de tokenizar. Si la conexión falla más
+    // adelante, esta referencia es lo único que permite verificar el
+    // estado real en vez de adivinar si hubo cobro.
+    const reference = buildReference(plan.id);
+    setReferenciaActual(reference);
+
     try {
-      const reference = buildReference(pkg.id, playerId);
-
-      const payload: Record<string, unknown> = {
-        reference,
-        email,
-        method: metodo,
-        acceptedTerms: acepta,
-      };
-
-      if (metodo === "CARD") {
-        setMensajeEspera("Validando tu tarjeta…");
-        // El número de tarjeta va del navegador directo a Wompi. Nuestro
-        // servidor solo verá el token que devuelve.
-        const [mes, anio] = vence.split("/");
-        const token = await tokenizeCard({
-          number: numero,
-          expMonth: mes,
-          expYear: anio,
-          cvc,
-          cardHolder: titular.trim(),
-        });
-        payload.cardToken = token.id;
-        payload.installments = cuotas;
-      } else {
-        payload.phoneNumber = celular.replace(/\D/g, "");
-      }
-
-      setMensajeEspera(
-        metodo === "NEQUI"
-          ? "Te enviamos una notificación a Nequi. Ábrela y aprueba el pago."
-          : "Procesando el pago con tu banco…"
-      );
-
-      const res = await fetch("/api/wompi/pay", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+      const [mes, anio] = vence.split("/");
+      const token = await tokenizeCard({
+        number: numero,
+        expMonth: mes,
+        expYear: anio,
+        cvc,
+        cardHolder: titular.trim(),
       });
 
-      const data = await res.json();
-
-      if (!res.ok) {
-        // El servidor ya viene con el error clasificado (fondos insuficientes,
-        // IP bloqueada, rate limiting, etc. — ver lib/payment-errors.ts) más
-        // un consejo accionable; los unimos en una sola frase para mostrarlos.
-        throw new Error(
-          [data.error, data.hint].filter(Boolean).join(" ") ||
-            "No pudimos iniciar el pago"
-        );
+      let res: Response;
+      try {
+        res = await fetch("/api/wompi/pay", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            reference,
+            email,
+            cardToken: token.id,
+            cardHolderName: titular.trim(),
+            acceptedTerms: acepta,
+          }),
+        });
+      } catch {
+        // La conexión falló entre EL NAVEGADOR y NUESTRO servidor — no
+        // sabemos si Wompi llegó a intentar el cobro. No es un rechazo
+        // bancario y no se debe reintentar a ciegas (ver README).
+        setFase("sin-confirmar");
+        return;
       }
 
-      if (data.status === "APPROVED") return setFase("aprobado");
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        const codigo = (data.code as PaymentErrorCode) ?? "UNKNOWN";
+        setResultado({
+          mensaje: [data.error, data.hint].filter(Boolean).join(" ") || "No pudimos iniciar el pago",
+          codigo,
+        });
+        setFase("rechazado");
+        return;
+      }
+
+      if (data.status === "APPROVED") {
+        setTxId(data.id);
+        setFase("aprobado");
+        return;
+      }
       if (data.status === "DECLINED" || data.status === "ERROR") {
-        const classified = classifyDeclineReason(data.statusMessage);
-        setError(`${classified.message} ${classified.hint ?? ""}`.trim());
-        return setFase("rechazado");
+        const c = classifyDeclineReason(data.statusMessage);
+        setResultado({ mensaje: c.message, hint: c.hint, codigo: c.code });
+        setFase("rechazado");
+        return;
       }
 
       await esperarResultado(data.id);
     } catch (err) {
-      if (err instanceof TypeError) {
-        // fetch() nunca llegó a nuestro propio servidor: sin internet, o el
-        // navegador cortó la conexión antes de recibir respuesta.
-        setError("No pudimos conectar con el servidor. Revisa tu conexión a internet e intenta de nuevo.");
-      } else {
-        setError(err instanceof Error ? err.message : "Algo salió mal");
-      }
+      // Fallas de tokenización: ya vienen como texto legible (validación de
+      // Wompi o clasificación de falla de red) desde lib/wompi-client.ts.
+      const classified = err instanceof TypeError ? classifyGatewayFailure({ networkError: true }) : null;
+      setResultado({
+        mensaje: classified ? `${classified.message} ${classified.hint ?? ""}`.trim() : err instanceof Error ? err.message : "Algo salió mal",
+        codigo: classified?.code ?? "UNKNOWN",
+      });
       setFase("rechazado");
     }
   }
 
-  function reintentar() {
-    setError(null);
-    setFase("form");
+  function copiarReferencia(ref: string) {
+    navigator.clipboard
+      .writeText(ref)
+      .then(() => {
+        setCopiado(true);
+        setTimeout(() => setCopiado(false), 2000);
+      })
+      .catch(() => {
+        /* Sin permiso del portapapeles no pasa nada grave: la referencia sigue visible para copiarla a mano. */
+      });
   }
 
   return (
     <div
-      className="fixed inset-0 z-40 flex justify-end bg-black/50"
-      role="dialog"
-      aria-modal="true"
+      className="fixed inset-0 z-40 flex justify-center overflow-y-auto bg-grafito/95 px-4 pb-10 pt-8"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
     >
-      <div className="flex h-full w-full max-w-md flex-col overflow-y-auto bg-surface p-6 shadow-xl">
-        <div className="flex items-center justify-between">
-          <h2 className="font-display text-lg font-bold">Completa tu compra</h2>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="checkout-titulo"
+        className="relative h-fit w-full max-w-sm bg-carbon"
+        style={{ clipPath: "polygon(0 0, calc(100% - 20px) 0, 100% 20px, 100% 100%, 0 100%)" }}
+      >
+        <div className="flex items-start justify-between p-6 pb-0">
+          <div>
+            <p className="font-mono text-[10px] uppercase tracking-[0.25em] text-ceniza">
+              Comprobante de recarga
+            </p>
+            <h2 id="checkout-titulo" className="mt-1 font-display text-lg text-hielo">
+              {plan.name} · {formatCOP(plan.priceCOP)}
+            </h2>
+          </div>
           <button
             onClick={onClose}
             aria-label="Cerrar"
-            className="rounded-full p-2 text-mist transition hover:bg-white/10 hover:text-white"
+            className="shrink-0 p-1 font-mono text-lg text-ceniza transition hover:text-hielo"
           >
-            ✕
+            ×
           </button>
         </div>
 
-        <div className="mt-6 rounded-xl border border-white/10 bg-surface2 p-4">
-          <p className="font-display font-semibold">
-            {pkg.diamonds.toLocaleString("es-CO")} diamantes
-            {pkg.bonus > 0 && <span className="text-teal"> +{pkg.bonus} bono</span>}
-          </p>
-          <p className="mt-1 font-display text-gold">{formatCOP(pkg.priceCOP)}</p>
-        </div>
+        <div className="p-6">
+          {fase === "aprobado" && txId && referenciaActual && (
+            <ResultadoAprobado
+              email={email}
+              referencia={referenciaActual}
+              transactionId={txId}
+              copiado={copiado}
+              onCopiar={() => copiarReferencia(referenciaActual)}
+              onCerrar={onClose}
+            />
+          )}
 
-        {fase === "aprobado" && (
-          <Resultado
-            tono="teal"
-            titulo="¡Pago aprobado!"
-            texto="Ya recibimos tu pago. Estamos recargando los diamantes en tu cuenta de Free Fire; te llegan en pocos minutos."
-            accion={{ texto: "Cerrar", onClick: onClose }}
-          />
-        )}
+          {fase === "expirado" && referenciaActual && (
+            <ResultadoTecnico
+              titulo="Seguimos esperando la confirmación"
+              detalle="El pago sigue en proceso en Wompi. Si se aprueba, la venta queda registrada igual aunque cierres esta ventana; te escribiremos al correo."
+              referencia={referenciaActual}
+              copiado={copiado}
+              onCopiar={() => copiarReferencia(referenciaActual)}
+              onCerrar={onClose}
+            />
+          )}
 
-        {fase === "expirado" && (
-          <Resultado
-            tono="gold"
-            titulo="Seguimos esperando la confirmación"
-            texto="El pago sigue en proceso en Wompi. Si se aprueba, recibirás tus diamantes igual, aunque cierres esta ventana. Revisa tu correo."
-            accion={{ texto: "Cerrar", onClick: onClose }}
-          />
-        )}
+          {fase === "sin-confirmar" && referenciaActual && (
+            <ResultadoTecnico
+              titulo="No pudimos confirmar el intento"
+              detalle="Falló la conexión con nuestro servidor, no tu tarjeta: no sabemos si Wompi llegó a procesar el cobro. No hagas otro pago todavía."
+              referencia={referenciaActual}
+              copiado={copiado}
+              onCopiar={() => copiarReferencia(referenciaActual)}
+              onCerrar={onClose}
+              accionSecundaria={{ texto: "Intentar de nuevo de todas formas", onClick: () => setFase("form") }}
+            />
+          )}
 
-        {fase === "rechazado" && (
-          <Resultado
-            tono="coral"
-            titulo="No pudimos completar el pago"
-            texto={
-              error ||
-              "El pago fue rechazado. Puedes intentar con otra tarjeta u otro medio de pago."
-            }
-            accion={{ texto: "Intentar de nuevo", onClick: reintentar }}
-          />
-        )}
+          {fase === "rechazado" && resultado && (
+            <ResultadoRechazo
+              tecnico={esTecnico(resultado.codigo)}
+              mensaje={resultado.mensaje}
+              hint={resultado.hint}
+              referencia={referenciaActual}
+              onReintentar={() => setFase("form")}
+            />
+          )}
 
-        {fase === "procesando" && (
-          <div className="mt-8 flex flex-col items-center gap-4 text-center">
-            <div className="h-10 w-10 animate-spin rounded-full border-2 border-white/20 border-t-gold" />
-            <p className="text-sm text-mist">{mensajeEspera}</p>
-            {metodo === "NEQUI" && (
-              <p className="text-xs text-mist/70">
-                No cierres esta ventana. La notificación puede tardar hasta un minuto.
-              </p>
-            )}
-          </div>
-        )}
-
-        {fase === "form" && (
-          <>
-            <div className="mt-6 space-y-4">
-              <Campo etiqueta="ID de jugador (UID) de Free Fire">
-                <input
-                  value={playerId}
-                  onChange={(e) => setPlayerId(sanitizePlayerId(e.target.value))}
-                  inputMode="numeric"
-                  autoComplete="off"
-                  placeholder="Ej: 123456789"
-                  className={inputCls}
-                />
-              </Campo>
-              <Campo etiqueta="Correo para tu recibo">
-                <input
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  type="email"
-                  autoComplete="email"
-                  placeholder="tucorreo@ejemplo.com"
-                  className={inputCls}
-                />
-              </Campo>
-            </div>
-
-            <div className="mt-6">
-              <p className="text-sm text-mist">Medio de pago</p>
-              <div className="mt-2 grid grid-cols-2 gap-2">
-                {(
-                  [
-                    ["CARD", "Tarjeta"],
-                    ["NEQUI", "Nequi"],
-                  ] as [Metodo, string][]
-                ).map(([valor, texto]) => (
-                  <button
-                    key={valor}
-                    type="button"
-                    onClick={() => setMetodo(valor)}
-                    aria-pressed={metodo === valor}
-                    className={`rounded-lg border py-2 text-sm font-medium transition ${
-                      metodo === valor
-                        ? "border-gold bg-gold/10 text-gold"
-                        : "border-white/10 bg-ink text-mist hover:border-white/25"
-                    }`}
-                  >
-                    {texto}
-                  </button>
-                ))}
+          {fase === "procesando" && (
+            <div className="flex flex-col items-center gap-3 py-8 text-center">
+              <div className="sello-animado h-10 w-10 text-turquesa">
+                <IconoSello className="h-10 w-10" />
               </div>
+              <p className="text-sm text-ceniza">Confirmando el pago con tu banco…</p>
+              <p className="font-mono text-xs text-ceniza/70">{segundos}s transcurridos</p>
             </div>
+          )}
 
-            {metodo === "CARD" ? (
-              <div className="mt-4 space-y-4">
+          {fase === "form" && (
+            <>
+              <div className="mt-2 space-y-4">
+                <Campo etiqueta="Correo">
+                  <input
+                    ref={emailRef}
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    type="email"
+                    autoComplete="email"
+                    placeholder="tucorreo@ejemplo.com"
+                    className={inputCls}
+                  />
+                </Campo>
+
+                <Campo etiqueta="Nombre del titular de la tarjeta">
+                  <input
+                    value={titular}
+                    onChange={(e) => setTitular(e.target.value)}
+                    autoComplete="cc-name"
+                    placeholder="PEDRO PÉREZ"
+                    className={inputCls}
+                  />
+                </Campo>
+
                 <Campo etiqueta="Número de la tarjeta">
                   <div className="relative">
                     <input
@@ -323,7 +356,7 @@ export default function CheckoutPanel({
                       className={inputCls}
                     />
                     {marca && (
-                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-mist">
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 font-mono text-[10px] text-ceniza">
                         {marca}
                       </span>
                     )}
@@ -331,7 +364,7 @@ export default function CheckoutPanel({
                 </Campo>
 
                 <div className="grid grid-cols-2 gap-3">
-                  <Campo etiqueta="Vence (MM/AA)">
+                  <Campo etiqueta="Vencimiento (MM/AA)">
                     <input
                       value={vence}
                       onChange={(e) => setVence(formatExpiry(e.target.value))}
@@ -352,147 +385,240 @@ export default function CheckoutPanel({
                     />
                   </Campo>
                 </div>
-
-                <Campo etiqueta="Nombre como aparece en la tarjeta">
-                  <input
-                    value={titular}
-                    onChange={(e) => setTitular(e.target.value)}
-                    autoComplete="cc-name"
-                    placeholder="PEDRO PÉREZ"
-                    className={inputCls}
-                  />
-                </Campo>
-
-                <Campo etiqueta="Cuotas">
-                  <select
-                    value={cuotas}
-                    onChange={(e) => setCuotas(Number(e.target.value))}
-                    className={inputCls}
-                  >
-                    {CUOTAS.map((n) => (
-                      <option key={n} value={n} className="bg-ink">
-                        {n === 1 ? "1 cuota" : `${n} cuotas`}
-                      </option>
-                    ))}
-                  </select>
-                </Campo>
               </div>
-            ) : (
-              <div className="mt-4">
-                <Campo etiqueta="Celular registrado en Nequi">
-                  <input
-                    value={celular}
-                    onChange={(e) => setCelular(e.target.value.replace(/\D/g, "").slice(0, 10))}
-                    inputMode="tel"
-                    autoComplete="tel-national"
-                    placeholder="3001234567"
-                    className={inputCls}
-                  />
-                </Campo>
-                <p className="mt-2 text-xs text-mist/70">
-                  Te llegará una notificación a la app de Nequi para aprobar el pago.
-                </p>
-              </div>
-            )}
 
-            <label className="mt-5 flex cursor-pointer items-start gap-2 text-xs text-mist">
-              <input
-                type="checkbox"
-                checked={acepta}
-                onChange={(e) => setAcepta(e.target.checked)}
-                className="mt-0.5 h-4 w-4 shrink-0 accent-gold"
-              />
-              <span>
-                Acepto el{" "}
-                <Enlace href={terminos?.acceptanceUrl}>reglamento de Wompi</Enlace> y la{" "}
-                <Enlace href={terminos?.personalDataUrl}>
-                  autorización de tratamiento de datos
-                </Enlace>
-                .
-              </span>
-            </label>
+              <label className="mt-5 flex cursor-pointer items-start gap-2 text-xs text-ceniza">
+                <input
+                  type="checkbox"
+                  checked={acepta}
+                  onChange={(e) => setAcepta(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 shrink-0 accent-turquesa"
+                />
+                <span>
+                  Acepto el{" "}
+                  <Enlace href={terminos?.acceptanceUrl}>reglamento de Wompi</Enlace> y la{" "}
+                  <Enlace href={terminos?.personalDataUrl}>
+                    autorización de tratamiento de datos
+                  </Enlace>
+                  .
+                </span>
+              </label>
 
-            {error && <p className="mt-4 text-sm text-coral">{error}</p>}
+              <button
+                onClick={pagar}
+                disabled={!puedePagar}
+                className="mt-5 w-full bg-turquesa py-3 font-display text-sm text-grafito transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-30"
+                style={{ clipPath: "polygon(10px 0, 100% 0, 100% 100%, 0 100%, 0 10px)" }}
+              >
+                Pagar {formatCOP(plan.priceCOP)}
+              </button>
 
-            <button
-              onClick={pagar}
-              disabled={!puedePagar}
-              className="mt-5 w-full rounded-full bg-gold py-3 font-display font-semibold text-ink transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              Pagar {formatCOP(pkg.priceCOP)}
-            </button>
+              <Perforacion className="my-5 text-ceniza/40" />
 
-            <p className="mt-3 text-center text-xs text-mist/60">
-              Pago procesado por Wompi (Grupo Bancolombia). Tus datos de tarjeta
-              viajan cifrados directamente a Wompi.
-            </p>
-          </>
-        )}
+              <p className="text-center text-[11px] leading-relaxed text-ceniza/70">
+                Pago procesado por Wompi. Tu tarjeta se cifra en este
+                navegador y nunca pasa por nuestro servidor. La recarga se
+                coordina por correo en menos de {HORAS_DE_ENTREGA} horas
+                tras la aprobación.
+              </p>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
 const inputCls =
-  "mt-1 w-full rounded-lg border border-white/10 bg-ink px-3 py-2 text-sm outline-none transition placeholder:text-mist/40 focus:border-gold";
+  "mt-1 w-full border border-ceniza/20 bg-grafito px-3 py-2 text-sm text-hielo outline-none transition placeholder:text-ceniza/40 focus-visible:border-turquesa";
 
-function Campo({
-  etiqueta,
-  children,
-}: {
-  etiqueta: string;
-  children: React.ReactNode;
-}) {
+function Campo({ etiqueta, children }: { etiqueta: string; children: ReactNode }) {
   return (
     <label className="block">
-      <span className="text-sm text-mist">{etiqueta}</span>
+      <span className="font-mono text-[11px] uppercase tracking-wide text-ceniza">{etiqueta}</span>
       {children}
     </label>
   );
 }
 
-function Enlace({ href, children }: { href?: string; children: React.ReactNode }) {
-  if (!href) return <span className="text-mist">{children}</span>;
+function Enlace({ href, children }: { href?: string; children: ReactNode }) {
+  if (!href) return <span>{children}</span>;
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="text-gold underline underline-offset-2"
-    >
+    <a href={href} target="_blank" rel="noopener noreferrer" className="text-turquesa underline underline-offset-2">
       {children}
     </a>
   );
 }
 
-function Resultado({
-  tono,
-  titulo,
-  texto,
-  accion,
+function ReferenciaConCopia({
+  referencia,
+  copiado,
+  onCopiar,
 }: {
-  tono: "teal" | "coral" | "gold";
-  titulo: string;
-  texto: string;
-  accion: { texto: string; onClick: () => void };
+  referencia: string;
+  copiado: boolean;
+  onCopiar: () => void;
 }) {
-  const tonos = {
-    teal: "border-teal/40 bg-teal/10 text-teal",
-    coral: "border-coral/40 bg-coral/10 text-coral",
-    gold: "border-gold/40 bg-gold/10 text-gold",
-  } as const;
-
   return (
-    <div className="mt-6">
-      <div className={`rounded-xl border p-4 ${tonos[tono]}`}>
-        <p className="font-display font-semibold">{titulo}</p>
-        <p className="mt-1 text-sm opacity-90">{texto}</p>
-      </div>
+    <div className="flex items-center justify-between gap-2 border border-ceniza/20 bg-grafito px-3 py-2">
+      <span className="truncate font-mono text-xs text-hielo">{referencia}</span>
       <button
-        onClick={accion.onClick}
-        className="mt-4 w-full rounded-full border border-white/15 py-3 font-display font-semibold text-white transition hover:bg-white/5"
+        onClick={onCopiar}
+        className="shrink-0 font-mono text-[10px] uppercase tracking-wide text-turquesa hover:brightness-110"
       >
-        {accion.texto}
+        {copiado ? "Copiado" : "Copiar"}
+      </button>
+    </div>
+  );
+}
+
+function ResultadoAprobado({
+  email,
+  referencia,
+  transactionId,
+  copiado,
+  onCopiar,
+  onCerrar,
+}: {
+  email: string;
+  referencia: string;
+  transactionId: string;
+  copiado: boolean;
+  onCopiar: () => void;
+  onCerrar: () => void;
+}) {
+  const asunto = encodeURIComponent(`Recarga PinFire — ${referencia}`);
+  return (
+    <div>
+      <div className="flex items-center gap-2 text-turquesa">
+        <IconoSello className="h-6 w-6" />
+        <p className="font-display text-base">Pago aprobado</p>
+      </div>
+      <p className="mt-2 text-sm text-ceniza">
+        Recibimos tu pago. Nos comunicaremos contigo a este correo para
+        coordinar la entrega en menos de {HORAS_DE_ENTREGA} horas, y te
+        pediremos el UID de tu cuenta de Free Fire.
+      </p>
+
+      <dl className="mt-4 space-y-3 font-mono text-xs">
+        <div>
+          <dt className="text-ceniza">Correo registrado</dt>
+          <dd className="mt-1 text-hielo">{email}</dd>
+        </div>
+        <div>
+          <dt className="text-ceniza">Referencia</dt>
+          <dd className="mt-1">
+            <ReferenciaConCopia referencia={referencia} copiado={copiado} onCopiar={onCopiar} />
+          </dd>
+        </div>
+        <div>
+          <dt className="text-ceniza">ID de transacción Wompi</dt>
+          <dd className="mt-1 truncate text-hielo">{transactionId}</dd>
+        </div>
+      </dl>
+
+      <a
+        href={`mailto:${CORREO_CONTACTO}?subject=${asunto}`}
+        className="mt-5 block w-full border border-ceniza/25 py-2.5 text-center font-display text-sm text-hielo transition hover:border-ceniza/50"
+      >
+        Escribir a {CORREO_CONTACTO}
+      </a>
+      <p className="mt-2 text-center text-[11px] text-ceniza/70">
+        Úsalo si no te hemos contactado dentro del plazo indicado.
+      </p>
+
+      <button onClick={onCerrar} className="mt-4 w-full bg-ceniza/10 py-2.5 font-display text-sm text-hielo hover:bg-ceniza/20">
+        Cerrar
+      </button>
+    </div>
+  );
+}
+
+/** Fases técnicas (expirado / sin-confirmar): rótulos neutros, siempre con la referencia visible. */
+function ResultadoTecnico({
+  titulo,
+  detalle,
+  referencia,
+  copiado,
+  onCopiar,
+  onCerrar,
+  accionSecundaria,
+}: {
+  titulo: string;
+  detalle: string;
+  referencia: string;
+  copiado: boolean;
+  onCopiar: () => void;
+  onCerrar: () => void;
+  accionSecundaria?: { texto: string; onClick: () => void };
+}) {
+  const asunto = encodeURIComponent(`Recarga PinFire — ${referencia}`);
+  return (
+    <div>
+      <p className="font-display text-base text-hielo">{titulo}</p>
+      <p className="mt-2 text-sm text-ceniza">{detalle}</p>
+
+      <div className="mt-4">
+        <p className="font-mono text-[11px] uppercase tracking-wide text-ceniza">Tu referencia</p>
+        <div className="mt-1">
+          <ReferenciaConCopia referencia={referencia} copiado={copiado} onCopiar={onCopiar} />
+        </div>
+      </div>
+
+      <a
+        href={`mailto:${CORREO_CONTACTO}?subject=${asunto}`}
+        className="mt-5 block w-full border border-ceniza/25 py-2.5 text-center font-display text-sm text-hielo transition hover:border-ceniza/50"
+      >
+        Escribir a {CORREO_CONTACTO}
+      </a>
+
+      {accionSecundaria && (
+        <button onClick={accionSecundaria.onClick} className="mt-3 w-full text-center font-mono text-xs text-ceniza underline underline-offset-2 hover:text-hielo">
+          {accionSecundaria.texto}
+        </button>
+      )}
+
+      <button onClick={onCerrar} className="mt-4 w-full bg-ceniza/10 py-2.5 font-display text-sm text-hielo hover:bg-ceniza/20">
+        Cerrar
+      </button>
+    </div>
+  );
+}
+
+/** Rechazo bancario normal vs. fallo técnico (rótulo "Resultado del intento" / "Detalle del resultado"). */
+function ResultadoRechazo({
+  tecnico,
+  mensaje,
+  hint,
+  referencia,
+  onReintentar,
+}: {
+  tecnico: boolean;
+  mensaje: string;
+  hint?: string;
+  referencia: string | null;
+  onReintentar: () => void;
+}) {
+  return (
+    <div>
+      <p className="font-display text-base text-magenta">
+        {tecnico ? "Resultado del intento" : "Pago no aprobado"}
+      </p>
+      <div className="mt-3 border border-magenta/30 bg-magenta/5 p-3">
+        {tecnico && (
+          <p className="font-mono text-[10px] uppercase tracking-wide text-ceniza">Detalle del resultado</p>
+        )}
+        <p className="mt-1 text-sm text-hielo">{mensaje}</p>
+        {hint && <p className="mt-2 text-xs text-ceniza">{hint}</p>}
+      </div>
+      {referencia && (
+        <p className="mt-3 font-mono text-[11px] text-ceniza/70">Referencia: {referencia}</p>
+      )}
+      <button
+        onClick={onReintentar}
+        className="mt-4 w-full bg-turquesa py-2.5 font-display text-sm text-grafito hover:brightness-110"
+      >
+        Intentar de nuevo
       </button>
     </div>
   );

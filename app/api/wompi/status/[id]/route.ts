@@ -4,11 +4,10 @@ import { getTransaction } from "@/lib/wompi-api";
 export const runtime = "nodejs";
 
 /**
- * Consulta el estado mientras el cliente espera en la página.
- *
- * Esto es solo para la interfaz. La entrega de los diamantes NO depende
- * de esta ruta: el usuario puede cerrar la pestaña a mitad del pago y el
- * cobro igual se completa. Quien manda es /api/wompi/webhook.
+ * Consulta el estado mientras el cliente espera en la página. Esto es solo
+ * cosmético: la confirmación de la venta NO depende de esta ruta. El
+ * comprador puede cerrar la pestaña a mitad del pago y el cobro se
+ * completa igual — quien manda es /api/wompi/webhook.
  */
 export async function GET(
   _req: NextRequest,
@@ -16,17 +15,10 @@ export async function GET(
 ) {
   try {
     const tx = await getTransaction(params.id);
-
-    // Para PSE y Bancolombia, Wompi devuelve aquí la URL del banco. Hoy
-    // no ofrecemos esos medios, pero si se agregan, el frontend la necesita.
-    const asyncUrl = (tx.payment_method?.extra as { async_payment_url?: string })
-      ?.async_payment_url;
-
     return NextResponse.json({
       id: tx.id,
       status: tx.status,
       statusMessage: tx.status_message ?? null,
-      ...(asyncUrl ? { asyncPaymentUrl: asyncUrl } : {}),
     });
   } catch (err) {
     console.error("Error consultando transacción:", err);

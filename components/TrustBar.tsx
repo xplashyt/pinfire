@@ -1,17 +1,35 @@
+import { IconoCandado, IconoSello, IconoSobre } from "./Iconos";
+import { HORAS_DE_ENTREGA } from "@/lib/contacto";
+
 const items = [
-  { title: "Entrega inmediata", detail: "Tus diamantes llegan apenas se confirma el pago" },
-  { title: "Pago seguro con Wompi", detail: "Tarjeta y Nequi, sin salir de la página" },
-  { title: "Soporte por WhatsApp", detail: "Te ayudamos si algo no llega como esperabas" },
+  {
+    Icono: IconoCandado,
+    title: "Tarjeta cifrada en tu navegador",
+    detail: "El número y el CVC viajan directo a Wompi. Nunca pasan por nuestro servidor.",
+  },
+  {
+    Icono: IconoSello,
+    title: "Comprobante al aprobarse el pago",
+    detail: "Referencia e ID de transacción quedan visibles apenas Wompi confirma.",
+  },
+  {
+    Icono: IconoSobre,
+    title: "Coordinación por correo",
+    detail: `Te escribimos en menos de ${HORAS_DE_ENTREGA} horas para pedirte el UID y recargar.`,
+  },
 ];
 
 export default function TrustBar() {
   return (
-    <section id="como-funciona" className="border-y border-white/5 bg-surface/40">
-      <div className="mx-auto grid max-w-5xl gap-6 px-6 py-10 sm:grid-cols-3">
-        {items.map((item) => (
-          <div key={item.title}>
-            <p className="font-display text-sm font-semibold text-gold">{item.title}</p>
-            <p className="mt-1 text-sm text-mist">{item.detail}</p>
+    <section id="como-funciona" className="border-y border-ceniza/10 bg-carbon/40">
+      <div className="mx-auto grid max-w-5xl gap-8 px-6 py-10 sm:grid-cols-3">
+        {items.map(({ Icono, title, detail }) => (
+          <div key={title} className="flex gap-3">
+            <Icono className="h-8 w-8 shrink-0 text-turquesa" />
+            <div>
+              <p className="font-display text-sm text-hielo">{title}</p>
+              <p className="mt-1 text-xs leading-relaxed text-ceniza">{detail}</p>
+            </div>
           </div>
         ))}
       </div>

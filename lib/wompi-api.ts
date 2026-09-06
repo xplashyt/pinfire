@@ -30,10 +30,10 @@ export class PaymentGatewayError extends Error {
  * nuestra propia página y hablamos con la API directamente. El reparto de
  * responsabilidades importa:
  *
- *   - Los datos de la tarjeta se tokenizan desde el NAVEGADOR contra Wompi
- *     usando la llave pública (ver lib/wompi-client.ts). El número de
- *     tarjeta nunca pasa por nuestro servidor, que es lo que nos mantiene
- *     fuera del alcance más pesado de PCI DSS.
+ *   - Los datos de la tarjeta se cifran en el NAVEGADOR (JWE con la llave
+ *     pública de cifrado, ver lib/wompi-client.ts) y se tokenizan directo
+ *     contra Wompi. El número de tarjeta nunca pasa por nuestro servidor,
+ *     que es lo que nos mantiene fuera del alcance más pesado de PCI DSS.
  *   - La transacción se crea desde el SERVIDOR con la llave privada, que
  *     nunca sale de aquí.
  */
@@ -50,6 +50,80 @@ function serverConfig() {
   return { publicKey, privateKey, integritySecret, base: wompiBaseUrl(publicKey) };
 }
 
+/**
+ * Envoltorio común para las llamadas GET de solo lectura de este archivo:
+ * texto primero, JSON después (una página de bloqueo de un WAF delante de
+ * la API de Wompi no es JSON, y `res.json()` reventaría antes de poder
+ * distinguir esa causa de un simple 5xx), tiempo de espera opcional y
+ * clasificación de la falla.
+ */
+async function wompiGet(
+  path: string,
+  authHeader: Record<string, string>,
+  timeoutMs?: number
+) {
+  let res: Response;
+  try {
+    const signal = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined;
+    res = await fetch(`${path}`, { headers: authHeader, cache: "no-store", signal });
+  } catch (error) {
+    console.error(`No se pudo conectar a ${path}:`, error);
+    const classified = classifyGatewayFailure({ networkError: true });
+    throw new PaymentGatewayError(classified.code, classified.message, classified.hint);
+  }
+
+  const rawText = await res.text().catch(() => "");
+  let body: Record<string, unknown> | null = null;
+  try {
+    body = rawText ? JSON.parse(rawText) : null;
+  } catch {
+    body = null;
+  }
+
+  if (!res.ok) {
+    console.error(`Wompi respondió con error en ${path}:`, {
+      httpStatus: res.status,
+      rawBody: body ? undefined : rawText.slice(0, 300),
+    });
+    const classified = classifyGatewayFailure({
+      httpStatus: res.status,
+      nonJsonResponse: body === null && rawText.length > 0,
+    });
+    throw new PaymentGatewayError(classified.code, classified.message, classified.hint);
+  }
+
+  return body;
+}
+
+/**
+ * Llave pública de cifrado para tokenizar tarjetas (JWE RSA-OAEP-256 +
+ * A256GCM). Viene como PEM en `data.publicKey`. Esta llamada la hace el
+ * SERVIDOR (ver app/api/wompi/tokenization-key/route.ts) porque, a la
+ * fecha de esta prueba (5 de septiembre de 2026), la respuesta real de
+ * Wompi para este endpoint no trae CORS: pedirla directo desde el
+ * navegador falla con "Failed to fetch" aunque el preflight OPTIONS sí
+ * responda. El POST posterior con la tarjeta cifrada (`/tokens/cards`) sí
+ * permite CORS y por eso ese sí sale directo del navegador.
+ */
+export async function getTokenizationPublicKey(): Promise<string> {
+  const { publicKey, base } = serverConfig();
+  const body = await wompiGet(
+    `${base}/tokens/keys/tokenization`,
+    { Authorization: `Bearer ${publicKey}` },
+    15_000
+  );
+
+  const data = body?.data as { publicKey?: string } | undefined;
+  if (!data?.publicKey) {
+    console.error("Respuesta de /tokens/keys/tokenization sin publicKey:", body);
+    throw new PaymentGatewayError(
+      "UNKNOWN",
+      "La pasarela de pagos no está configurada correctamente. Escríbenos para completar tu compra."
+    );
+  }
+  return data.publicKey;
+}
+
 export interface AcceptanceTokens {
   acceptanceToken: string;
   acceptanceUrl: string;
@@ -61,54 +135,27 @@ export interface AcceptanceTokens {
  * Wompi exige que el usuario acepte dos contratos (reglamento y
  * tratamiento de datos) antes de cobrar. Los tokens vienen firmados y
  * caducan a la hora, así que se piden justo antes de pagar, no se cachean.
+ *
+ * Usa `GET /merchants/info` con el header `x-merchant-public-key`: el
+ * endpoint viejo `GET /merchants/:llave_publica` deja de estar disponible
+ * el 31 de octubre de 2026 según la documentación vigente de Wompi.
  */
 export async function getAcceptanceTokens(): Promise<AcceptanceTokens> {
   const { publicKey, base } = serverConfig();
+  const body = await wompiGet(`${base}/merchants/info`, {
+    "x-merchant-public-key": publicKey,
+  });
 
-  let res: Response;
-  try {
-    res = await fetch(`${base}/merchants/${publicKey}`, {
-      cache: "no-store",
-    });
-  } catch (error) {
-    console.error("No se pudo conectar para pedir los tokens de aceptación:", error);
-    const classified = classifyGatewayFailure({ networkError: true });
-    throw new PaymentGatewayError(classified.code, classified.message, classified.hint);
-  }
+  const data = body?.data as {
+    presigned_acceptance?: { acceptance_token?: string; permalink?: string };
+    presigned_personal_data_auth?: { acceptance_token?: string; permalink?: string };
+  } | undefined;
 
-  // Texto primero, JSON después: si lo que volvió no es JSON (por ejemplo una
-  // página de bloqueo de un WAF delante de la API de Wompi), `res.json()`
-  // lanzaría antes de poder distinguir esa causa de un simple 5xx.
-  const rawText = await res.text().catch(() => "");
-  let body: {
-    data?: {
-      presigned_acceptance?: { acceptance_token?: string; permalink?: string };
-      presigned_personal_data_auth?: { acceptance_token?: string; permalink?: string };
-    };
-  } | null = null;
-  try {
-    body = rawText ? JSON.parse(rawText) : null;
-  } catch {
-    body = null;
-  }
-
-  if (!res.ok) {
-    console.error("Wompi /merchants respondió con error:", {
-      httpStatus: res.status,
-      rawBody: body ? undefined : rawText.slice(0, 300),
-    });
-    const classified = classifyGatewayFailure({
-      httpStatus: res.status,
-      nonJsonResponse: body === null && rawText.length > 0,
-    });
-    throw new PaymentGatewayError(classified.code, classified.message, classified.hint);
-  }
-
-  const acceptance = body?.data?.presigned_acceptance;
-  const personal = body?.data?.presigned_personal_data_auth;
+  const acceptance = data?.presigned_acceptance;
+  const personal = data?.presigned_personal_data_auth;
 
   if (!acceptance?.acceptance_token || !personal?.acceptance_token) {
-    console.error("Respuesta de /merchants sin tokens de aceptación:", body);
+    console.error("Respuesta de /merchants/info sin tokens de aceptación:", body);
     throw new PaymentGatewayError(
       "UNKNOWN",
       "La pasarela de pagos no está configurada correctamente. Escríbenos para completar tu compra."
@@ -123,9 +170,7 @@ export async function getAcceptanceTokens(): Promise<AcceptanceTokens> {
   };
 }
 
-export type PaymentMethodInput =
-  | { type: "CARD"; token: string; installments: number }
-  | { type: "NEQUI"; phone_number: string };
+export type PaymentMethodInput = { type: "CARD"; token: string; installments: number };
 
 export interface CreateTransactionInput {
   reference: string;
@@ -135,7 +180,6 @@ export interface CreateTransactionInput {
   acceptanceToken: string;
   personalDataToken: string;
   customerFullName: string;
-  customerIp?: string;
 }
 
 export interface WompiTransaction {
@@ -178,7 +222,8 @@ export async function createTransaction(
         signature,
         payment_method: input.paymentMethod,
         customer_data: { full_name: input.customerFullName },
-        ...(input.customerIp ? { ip: input.customerIp } : {}),
+        // A propósito NO se manda `ip`: no se usa la IP del comprador
+        // como señal antifraude (ver sección 7 del README).
       }),
     });
   } catch (error) {
@@ -257,8 +302,7 @@ function collectMessages(node: unknown, out: string[] = []): string[] {
 /**
  * Consulta de estado. Se usa con la llave pública porque el navegador
  * consulta a través de nuestra ruta /api/wompi/status mientras espera a
- * que el pago se resuelva (la tarjeta tarda segundos; el push de Nequi,
- * lo que el usuario se demore en aceptarlo en su celular).
+ * que el pago se resuelva. Con tarjeta esto suele tardar segundos.
  */
 export async function getTransaction(id: string): Promise<WompiTransaction> {
   const { publicKey, base } = serverConfig();

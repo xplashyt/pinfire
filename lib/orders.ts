@@ -1,54 +1,45 @@
-import { packages, type PinPackage } from "./products";
+import { plans, type Plan } from "./plans";
 
 /**
- * Este proyecto no tiene base de datos. El único dato propio que Wompi
- * nos devuelve sin alterar en el webhook es la referencia, así que la
- * usamos para transportar el paquete y el UID del jugador:
+ * Este proyecto no tiene base de datos. El único dato propio que Wompi nos
+ * devuelve sin alterar es la referencia, así que la usamos para transportar
+ * qué tarjeta se compró:
  *
- *   pinfire-<idPaquete>-<uid>-<timestamp>
- *   pinfire-ff-520-123456789-1753632000000
+ *   pin-<idPlan>-<timestamp>
+ *   pin-pin-medio-1753632000000
  *
- * El timestamp está solo para que cada referencia sea única (Wompi
- * rechaza referencias repetidas). Se parsea desde la derecha porque los
- * ids de paquete contienen guiones ("ff-520").
+ * El timestamp solo existe para que cada referencia sea única (Wompi
+ * rechaza referencias repetidas). Se parsea DESDE LA DERECHA porque el id
+ * del plan (p. ej. "pin-medio") ya contiene guiones.
+ *
+ * El UID del jugador NO viaja en la referencia ni se pide en el checkout:
+ * la entrega es manual (ver lib/contacto.ts), así que el vendedor lo pide
+ * por correo después de confirmar el pago.
  */
+const PREFIX = "pin";
 
-const PREFIX = "pinfire";
-
-export function sanitizePlayerId(raw: string): string {
-  // Los UID de Free Fire son numéricos. Limpiamos cualquier otro
-  // carácter para que no rompa el formato de la referencia.
-  return raw.replace(/\D/g, "");
-}
-
-export function buildReference(packageId: string, playerId: string): string {
-  const uid = sanitizePlayerId(playerId);
-  return `${PREFIX}-${packageId}-${uid}-${Date.now()}`;
+export function buildReference(planId: string): string {
+  return `${PREFIX}-${planId}-${Date.now()}`;
 }
 
 export interface ParsedOrder {
-  packageId: string;
-  playerId: string;
-  pkg: PinPackage | null;
+  planId: string;
+  plan: Plan | null;
 }
 
 export function parseReference(reference: string): ParsedOrder | null {
   const parts = reference.split("-");
 
-  // pinfire + al menos un segmento de paquete + uid + timestamp
-  if (parts.length < 4 || parts[0] !== PREFIX) return null;
+  // pin + al menos un segmento de plan + timestamp
+  if (parts.length < 3 || parts[0] !== PREFIX) return null;
 
   const timestamp = parts[parts.length - 1];
-  const playerId = parts[parts.length - 2];
-  const packageId = parts.slice(1, -2).join("-");
+  const planId = parts.slice(1, -1).join("-");
 
-  if (!/^\d+$/.test(timestamp) || !/^\d+$/.test(playerId) || !packageId) {
-    return null;
-  }
+  if (!/^\d+$/.test(timestamp) || !planId) return null;
 
   return {
-    packageId,
-    playerId,
-    pkg: packages.find((p) => p.id === packageId) ?? null,
+    planId,
+    plan: plans.find((p) => p.id === planId) ?? null,
   };
 }

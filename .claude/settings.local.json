@@ -12,7 +12,6 @@
       "WebSearch",
       "Bash(node -e \"let s='';process.stdin.on\\('data',d=>s+=d\\).on\\('end',\\(\\)=>{const d=JSON.parse\\(s\\).data;console.log\\(JSON.stringify\\({keys:Object.keys\\(d\\),presigned_acceptance:d.presigned_acceptance,presigned_personal_data_auth:d.presigned_personal_data_auth,accepted_currencies:d.accepted_currencies,payment_methods:d.accepted_payment_methods||d.payment_methods},null,2\\)\\)}\\)\")",
       "Bash(node \"C:/Users/Hola/AppData/Local/Temp/claude/D--pinfire-store/fd67d41b-fb09-42ac-b3e1-dc657b254af5/scratchpad/test-integrado.mjs\")",
-      "Bash(curl -s -X POST https://production.wompi.co/v1/transactions -H 'Authorization: Bearer prv_prod_RC2yBOBUJeoawHTfgHf6OXbEYzsYh9ZL' -H 'Content-Type: application/json' -d '{\"acceptance_token\":\"x\",\"amount_in_cents\":2490000,\"currency\":\"COP\",\"customer_email\":\"a@b.co\",\"reference\":\"pinfire-ff-520-123456789-1753632000000\",\"signature\":\"x\",\"payment_method\":{\"type\":\"CARD\",\"token\":\"tok_prod_no_existe\",\"installments\":1}}')",
       "Bash(node -e \"let s='';process.stdin.on\\('data',d=>s+=d\\).on\\('end',\\(\\)=>console.log\\(JSON.stringify\\(JSON.parse\\(s\\),null,2\\)\\)\\)\")",
       "Bash(node -e ' *)",
       "Bash(python -c \"import playwright; print\\('playwright ok'\\)\")",
@@ -28,7 +27,9 @@
       "Bash(netstat -ano)",
       "Bash(curl -s -o /dev/null -w \"3002 home: %{http_code}\\\\n\" http://localhost:3002/)",
       "Bash(node *)",
-      "Bash(taskkill //PID 2540 //T //F)"
+      "Bash(taskkill //PID 2540 //T //F)",
+      "Bash(curl -s --max-time 25 -w \"\\\\nHTTP %{http_code}\\\\n\" https://pinfire.vercel.app/api/wompi/acceptance)",
+      "Bash(echo \"exit=$?\")"
     ]
   }
 }

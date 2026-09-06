@@ -6,10 +6,10 @@ import crypto from "crypto";
  * Fórmula documentada por Wompi: SHA-256 de la concatenación de
  * referencia + monto en centavos + moneda + secreto de integridad.
  *
- * Importante: verifica esta fórmula contra la documentación vigente de
- * Wompi (https://docs.wompi.co) antes de pasar a producción. Las
- * pasarelas de pago a veces ajustan el formato exacto, y una firma mal
- * construida hace que el widget rechace la transacción silenciosamente.
+ * Verifica esta fórmula contra la documentación vigente de Wompi
+ * (https://docs.wompi.co) antes de pasar a producción. Las pasarelas de
+ * pago a veces ajustan el formato exacto, y una firma mal construida hace
+ * que la transacción se rechace silenciosamente.
  */
 export function buildIntegritySignature(
   reference: string,
@@ -25,11 +25,15 @@ export function buildIntegritySignature(
  * Verificación de la firma de un evento (webhook) de Wompi.
  *
  * Wompi indica en `signature.properties` qué campos de `data` se deben
- * concatenar (en ese orden) junto con el timestamp del evento y tu
- * secreto de eventos, para luego compararlo contra `signature.checksum`.
+ * concatenar (en ese orden) junto con el timestamp del evento y el
+ * secreto de eventos, para comparar contra `signature.checksum`.
  *
- * Igual que con la firma de integridad: confirma el detalle exacto en
- * la documentación oficial antes de confiar en esto para producción.
+ * La comparación va por `timingSafeEqual`, no por `===`: comparar strings
+ * secretos con `===` sale más rápido cuando difieren pronto, y esa
+ * diferencia de tiempo es en teoría explotable para adivinar el checksum
+ * byte a byte. `timingSafeEqual` exige buffers del mismo largo, así que
+ * primero se descarta la longitud (que no es secreta) y solo se hace la
+ * comparación a tiempo constante cuando ya coinciden en tamaño.
  */
 export function verifyEventSignature(
   data: Record<string, unknown>,
@@ -50,5 +54,9 @@ export function verifyEventSignature(
 
   const chain = `${values.join("")}${timestamp}${eventsSecret}`;
   const expected = crypto.createHash("sha256").update(chain).digest("hex");
-  return expected === checksum;
+
+  const a = Buffer.from(expected, "hex");
+  const b = Buffer.from(checksum, "hex");
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }

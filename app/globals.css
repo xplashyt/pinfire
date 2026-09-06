@@ -2,23 +2,97 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  /* La usan los "recortes" de components/Perforacion.tsx para pintarse del
+     mismo color que el fondo de página y simular una muesca troquelada. */
+  --bg-page: #0a0d0c;
+}
+
+/*
+ * Animación de carga: la tarjeta de recarga "se imprime" (entra desde
+ * abajo, como si saliera de una ranura) y su sello holográfico hace un
+ * barrido de luz una sola vez al asentarse — el mismo gesto de tantear un
+ * sticker holográfico contra la luz para comprobar que es auténtico.
+ * Ambas quedan DESACTIVADAS por defecto: solo se activan dentro del
+ * media query de abajo, así que con prefers-reduced-motion el usuario ve
+ * directamente el estado final (la tarjeta ya sellada), nunca un elemento
+ * atascado en su estado inicial invisible.
+ */
+@keyframes tarjeta-entrada {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes sello-barrido {
+  0% {
+    opacity: 0;
+    transform: translateX(-120%) rotate(20deg);
+  }
+  35% {
+    opacity: 0.9;
+  }
+  60% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(120%) rotate(20deg);
+  }
+}
+
 @keyframes facet-glow {
   0%,
   100% {
-    filter: drop-shadow(0 0 6px rgba(245, 185, 66, 0.35));
+    filter: drop-shadow(0 0 6px rgba(73, 230, 201, 0.35));
   }
   50% {
-    filter: drop-shadow(0 0 18px rgba(245, 185, 66, 0.65));
+    filter: drop-shadow(0 0 16px rgba(73, 230, 201, 0.65));
   }
 }
 
 @media (prefers-reduced-motion: no-preference) {
+  .tarjeta-animada {
+    opacity: 0;
+    animation: tarjeta-entrada 0.38s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  .sello-animado {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .sello-animado::after {
+    content: "";
+    position: absolute;
+    inset: -40%;
+    background: linear-gradient(
+      100deg,
+      transparent 40%,
+      rgba(244, 246, 245, 0.85) 50%,
+      transparent 60%
+    );
+    animation: sello-barrido 0.6s ease-out 0.42s both;
+  }
+
   .animate-facet-glow {
     animation: facet-glow 3.2s ease-in-out infinite;
+  }
+
+  /* Microinteracción: el mismo barrido, en miniatura, al pasar el cursor
+     por una tarjeta de plan — repite el gesto material del hero. */
+  .sello-hover:hover .sello-hover-barrido,
+  .sello-hover:focus-within .sello-hover-barrido {
+    animation: sello-barrido 0.5s ease-out both;
   }
 }
 
 :focus-visible {
-  outline: 2px solid theme("colors.teal");
+  outline: 2px solid #49e6c9;
   outline-offset: 2px;
 }

@@ -1,23 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyEventSignature } from "@/lib/wompi";
 import { parseReference } from "@/lib/orders";
-import { sendOrderEmail } from "@/lib/email";
+import { formatCOP } from "@/lib/plans";
 
 export const runtime = "nodejs";
 
-// Wompi puede reenviar el mismo evento (reintentos, doble entrega). Esto
-// evita correos duplicados dentro de una misma instancia del servidor,
-// pero NO es garantía: si el proceso se reinicia o hay varias instancias,
-// un reintento tardío puede volver a pasar. Con pocos pedidos al día es
-// suficiente; si el volumen crece, esto pide una base de datos.
+// Wompi puede reenviar el mismo evento (reintentos, doble entrega). Este
+// `Set` evita una segunda línea de log dentro de una misma instancia del
+// servidor, pero NO es garantía: si el proceso se reinicia o hay varias
+// instancias corriendo, un reintento tardío puede volver a registrarse. Con
+// pocas ventas al día alcanza; si el volumen crece, esto pide una base de
+// datos real.
 const procesados = new Set<string>();
 
-// Esta ruta es la única fuente de verdad sobre si un pago se completó.
-// El callback que recibe el navegador al cerrar el widget es solo para
-// mejorar la experiencia (mostrar un mensaje); nunca entregues los
-// diamantes basándote únicamente en lo que pasa en el frontend, porque
-// el usuario puede cerrar la pestaña antes de que el pago se confirme,
-// o alguien podría intentar falsificar esa respuesta del navegador.
+/**
+ * Única fuente de verdad sobre si una venta se completó. El estado que ve
+ * el navegador (app/api/wompi/status/[id]) es solo para mostrar un mensaje
+ * mientras espera: nunca decide si hubo venta, porque el comprador puede
+ * cerrar la pestaña antes de que Wompi confirme, o alguien podría intentar
+ * falsificar esa respuesta del lado del cliente.
+ *
+ * No hay entrega automática: aquí solo se registra la venta en el log. El
+ * vendedor la ve, entra al panel de Wompi para confirmar el pago y escribe
+ * al comprador (correo que viaja en el evento) para pedirle el UID y
+ * coordinar la recarga — ver lib/contacto.ts.
+ */
 export async function POST(req: NextRequest) {
   const event = await req.json().catch(() => null);
 
@@ -45,48 +52,45 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Firma inválida" }, { status: 401 });
   }
 
-  const transaction = (event.data as any)?.transaction;
+  const transaction = (event.data as Record<string, unknown>)?.transaction as
+    | Record<string, unknown>
+    | undefined;
 
+  // A partir de aquí la firma ya cuadró: respondemos 200 siempre, incluso
+  // si el pago no fue aprobado o la referencia no se puede leer. Ya no hay
+  // nada que pueda fallar de nuestro lado y justifique que Wompi reintente
+  // el evento; lo que sí amerita revisión manual queda en el log.
   if (transaction?.status !== "APPROVED") {
-    // Rechazado, con error o pendiente: no hay nada que recargar. El
-    // cliente puede reintentar con otro medio de pago.
     console.log("Pago no aprobado:", transaction?.reference, transaction?.status);
     return NextResponse.json({ received: true });
   }
 
-  if (procesados.has(transaction.id)) {
+  const transactionId = String(transaction.id);
+  if (procesados.has(transactionId)) {
     return NextResponse.json({ received: true, duplicado: true });
   }
+  procesados.add(transactionId);
 
   const order = parseReference(String(transaction.reference || ""));
 
-  if (!order) {
-    // Pago cobrado pero no podemos saber a quién recargarle. Se registra
-    // en el log para revisarlo a mano en el panel de Wompi.
+  if (!order?.plan) {
+    // Pago cobrado pero no podemos saber qué se vendió. Se registra en el
+    // log para revisarlo a mano en el panel de Wompi.
     console.error(
-      "Pago aprobado con referencia ilegible:",
+      "[VENTA PAGADA] referencia ilegible — revisar a mano:",
       transaction.reference,
-      transaction.id
+      transactionId
     );
     return NextResponse.json({ received: true, aviso: "referencia ilegible" });
   }
 
-  await sendOrderEmail({
-    playerId: order.playerId,
-    packageId: order.packageId,
-    diamonds: order.pkg?.diamonds ?? null,
-    bonus: order.pkg?.bonus ?? null,
-    amountInCents: Number(transaction.amount_in_cents) || 0,
-    reference: String(transaction.reference),
-    transactionId: String(transaction.id),
-    customerEmail: transaction.customer_email ?? null,
-    paymentMethod: transaction.payment_method_type ?? null,
-  });
-
-  // Solo se marca como procesado si el correo salió bien. Si falló, la
-  // excepción de arriba hace que Wompi reintente el evento.
-  procesados.add(transaction.id);
-  console.log("Pedido notificado:", order.playerId, transaction.reference);
+  console.log(
+    `[VENTA PAGADA] plan=${order.plan.name} (${order.plan.id}) ` +
+      `referencia=${transaction.reference} transaccion=${transactionId} ` +
+      `correo=${transaction.customer_email ?? "no informado"} ` +
+      `monto=${formatCOP(Number(transaction.amount_in_cents ?? 0) / 100)} ` +
+      `medio=${transaction.payment_method_type ?? "no informado"}`
+  );
 
   return NextResponse.json({ received: true });
 }
