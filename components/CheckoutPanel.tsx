@@ -235,18 +235,26 @@ export default function CheckoutPanel({
 
   return (
     <div
-      className="fixed inset-0 z-40 flex justify-center overflow-y-auto bg-grafito/95 px-4 pb-10 pt-8"
+      className="fixed inset-0 z-40 flex justify-center overflow-y-auto bg-grafito/[0.97] px-4 pb-10 pt-8"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
+      {/* El corte diagonal se lleva el borde de la caja, así que el filo va en
+          un envoltorio con el mismo recorte: sin él, el panel (#141917) queda a
+          un paso del fondo oscurecido y el formulario parece texto suelto
+          encima de la página en vez de una ventana aparte. */}
       <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="checkout-titulo"
-        className="relative h-fit w-full max-w-sm bg-carbon"
-        style={{ clipPath: "polygon(0 0, calc(100% - 20px) 0, 100% 20px, 100% 100%, 0 100%)" }}
+        className="h-fit w-full max-w-sm bg-turquesa/70 p-[2px]"
+        style={{ clipPath: CORTE_COMPROBANTE }}
       >
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="checkout-titulo"
+          className="relative bg-carbon"
+          style={{ clipPath: CORTE_COMPROBANTE }}
+        >
         <div className="flex items-start justify-between p-6 pb-0">
           <div>
             <p className="font-mono text-[10px] uppercase tracking-[0.25em] text-ceniza">
@@ -423,11 +431,16 @@ export default function CheckoutPanel({
               </p>
             </>
           )}
+          </div>
         </div>
       </div>
     </div>
   );
 }
+
+// El mismo corte diagonal para el filo y para el panel: el envoltorio pinta el
+// borde y el interior lo tapa dejando solo un hilo de turquesa a la vista.
+const CORTE_COMPROBANTE = "polygon(0 0, calc(100% - 20px) 0, 100% 20px, 100% 100%, 0 100%)";
 
 const inputCls =
   "mt-1 w-full border border-ceniza/20 bg-grafito px-3 py-2 text-sm text-hielo outline-none transition placeholder:text-ceniza/40 focus-visible:border-turquesa";

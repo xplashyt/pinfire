@@ -11,7 +11,11 @@
  */
 export default function Perforacion({ className = "" }: { className?: string }) {
   return (
-    <div className={`relative h-5 w-full ${className}`} aria-hidden="true">
+    // overflow-hidden: las dos muescas se pintan a caballo del borde, y sin
+    // recortarlas la mitad que sobresale a la derecha empuja el ancho de la
+    // página y aparece scroll horizontal a 360 px. Recortada se ve igual: la
+    // mordida que queda es justo la mitad que se quiere.
+    <div className={`relative h-5 w-full overflow-hidden ${className}`} aria-hidden="true">
       <div
         className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 opacity-60"
         style={{
